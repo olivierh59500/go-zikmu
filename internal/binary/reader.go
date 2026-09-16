@@ -23,6 +23,38 @@ type Reader struct {
 	off  int64
 }
 
+func ReadAllAt(r io.ReaderAt, size int64) ([]byte, error) {
+	if r == nil {
+		return nil, fmt.Errorf("binary: nil reader")
+	}
+	if size < 0 {
+		return nil, fmt.Errorf("binary: negative size %d", size)
+	}
+	if uint64(size) > uint64(^uint(0)>>1) {
+		return nil, fmt.Errorf("binary: size does not fit in int: %d", size)
+	}
+
+	buf := make([]byte, int(size))
+	offset := 0
+	for offset < len(buf) {
+		n, err := r.ReadAt(buf[offset:], int64(offset))
+		if n < 0 || n > len(buf)-offset {
+			return nil, fmt.Errorf("binary: invalid read count %d", n)
+		}
+		offset += n
+		if offset == len(buf) {
+			return buf, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if n == 0 {
+			return nil, io.ErrNoProgress
+		}
+	}
+	return buf, nil
+}
+
 func NewReader(r io.ReaderAt, size int64) *Reader {
 	return &Reader{
 		r:    r,
@@ -46,7 +78,7 @@ func (r *Reader) Remaining() int64 {
 	return r.size - r.off
 }
 
-func (r *Reader) Seek(offset int64, whence int) error {
+func (r *Reader) Seek(offset int64, whence int) (int64, error) {
 	var next int64
 
 	switch whence {
@@ -57,19 +89,20 @@ func (r *Reader) Seek(offset int64, whence int) error {
 	case io.SeekEnd:
 		next = r.size + offset
 	default:
-		return fmt.Errorf("binary: invalid whence %d", whence)
+		return r.off, fmt.Errorf("binary: invalid whence %d", whence)
 	}
 
 	if next < 0 || next > r.size {
-		return fmt.Errorf("binary: seek out of range: %d", next)
+		return r.off, fmt.Errorf("binary: seek out of range: %d", next)
 	}
 
 	r.off = next
-	return nil
+	return r.off, nil
 }
 
 func (r *Reader) Skip(size int64) error {
-	return r.Seek(size, io.SeekCurrent)
+	_, err := r.Seek(size, io.SeekCurrent)
+	return err
 }
 
 func (r *Reader) Section(offset, size int64) (*Reader, error) {

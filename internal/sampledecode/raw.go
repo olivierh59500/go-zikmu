@@ -1,9 +1,9 @@
 package sampledecode
 
 import (
+	"encoding/binary"
 	"fmt"
 
-	"github.com/olivierh59500/go-zikmu/internal/binary"
 	"github.com/olivierh59500/go-zikmu/internal/module"
 )
 
@@ -37,20 +37,16 @@ func decodeRaw16(data []byte, sampleCount int, flags module.SampleFlags) ([]int1
 		return nil, fmt.Errorf("sampledecode: raw 16-bit sample truncated: have=%d want=%d", len(data), sampleCount*2)
 	}
 
-	reader := binary.NewBuffer(data)
 	samples := make([]int16, sampleCount)
-	for i := 0; i < sampleCount; i++ {
-		var value uint16
-		var err error
-		if flags&module.SampleBigEndian != 0 {
-			value, err = reader.Uint16BE()
-		} else {
-			value, err = reader.Uint16LE()
+	data = data[:sampleCount*2]
+	if flags&module.SampleBigEndian != 0 {
+		for i := range samples {
+			samples[i] = int16(binary.BigEndian.Uint16(data[i*2:]))
 		}
-		if err != nil {
-			return nil, err
-		}
-		samples[i] = int16(value)
+		return samples, nil
+	}
+	for i := range samples {
+		samples[i] = int16(binary.LittleEndian.Uint16(data[i*2:]))
 	}
 	return samples, nil
 }

@@ -277,12 +277,12 @@ func (e *Engine) Reset() error {
 	e.ended = false
 	e.flow = flowState{jumpOrder: -1, breakRow: -1, loopRow: -1}
 
-	e.channels = make([]channelState, e.module.Channels)
-	e.channelVoices = make([]int, e.module.Channels)
+	e.channels = resizeZeroed(e.channels, e.module.Channels)
+	e.channelVoices = resizeZeroed(e.channelVoices, e.module.Channels)
 	for i := range e.channelVoices {
 		e.channelVoices[i] = -1
 	}
-	e.detachedVoices = nil
+	e.detachedVoices = e.detachedVoices[:0]
 	e.voiceCount = maxInt(e.module.Channels, e.module.Voices)
 	if e.voiceCount < 0 {
 		e.voiceCount = 0
@@ -329,6 +329,12 @@ func (e *Engine) Reset() error {
 
 func (e *Engine) Snapshot() Snapshot {
 	return cloneSnapshot(e.snapshot)
+}
+
+// SnapshotView returns the current snapshot without copying its channel data.
+// The returned slices remain valid only until the next Reset or AdvanceTicks.
+func (e *Engine) SnapshotView() Snapshot {
+	return e.snapshot
 }
 
 func (e *Engine) AdvanceTicks(count int) error {
@@ -1818,12 +1824,12 @@ func (e *Engine) captureSnapshot() {
 		patternIndex = int(e.module.Orders[e.order])
 	}
 
-	channels := make([]ChannelSnapshot, len(e.channels))
+	channels := resizeZeroed(e.snapshot.Channels, len(e.channels))
 	for i := range e.channels {
 		channels[i] = e.snapshotChannel(e.channels[i])
 	}
 
-	voices := make([]ChannelSnapshot, e.voiceCount)
+	voices := resizeZeroed(e.snapshot.Voices, e.voiceCount)
 	for index, channel := range e.channels {
 		if index >= len(e.channelVoices) {
 			continue
@@ -1921,6 +1927,15 @@ func cloneSnapshot(snapshot Snapshot) Snapshot {
 	cloned.Channels = append([]ChannelSnapshot(nil), snapshot.Channels...)
 	cloned.Voices = append([]ChannelSnapshot(nil), snapshot.Voices...)
 	return cloned
+}
+
+func resizeZeroed[T any](values []T, size int) []T {
+	if cap(values) < size {
+		return make([]T, size)
+	}
+	values = values[:size]
+	clear(values)
+	return values
 }
 
 func noteDelayTick(cmd unitrk.Command) (int, bool) {

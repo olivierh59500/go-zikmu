@@ -17,7 +17,6 @@ type player struct {
 	config          Config
 	engine          *replay.Engine
 	mixer           *mixer.Mixer
-	pcmScratch      []int16
 	framesUntilTick int
 	positionFrames  int64
 	volume          float32
@@ -53,7 +52,8 @@ func NewPlayer(module *Module, cfg Config) (Player, error) {
 	if err != nil {
 		return nil, err
 	}
-	softwareMixer.Reset(engine.Snapshot())
+	softwareMixer.Reset(engine.SnapshotView())
+	softwareMixer.Reserve(cfg.BufferSamples)
 
 	return &player{
 		module:          module,
@@ -148,8 +148,11 @@ func (p *player) Stream() io.ReadSeeker {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.stream == nil {
+		samples := p.config.BufferSamples * p.config.Channels
 		p.stream = &pcmStream{
-			player: p,
+			player:  p,
+			pending: make([]byte, 0, p.config.Channels*4),
+			scratch: make([]float32, samples),
 		}
 	}
 	return p.stream
@@ -171,7 +174,7 @@ func (p *player) resetLocked() error {
 	if err := p.engine.Reset(); err != nil {
 		return err
 	}
-	p.mixer.Reset(p.engine.Snapshot())
+	p.mixer.Reset(p.engine.SnapshotView())
 	p.framesUntilTick = maxInt(p.engine.CurrentTickFrames(), 1)
 	p.positionFrames = 0
 	if p.stream != nil {
@@ -191,18 +194,22 @@ func (p *player) seekFramesLocked(target int64) error {
 		return nil
 	}
 
-	bufferFrames := maxInt(p.config.BufferSamples, 256)
-	buffer := make([]float32, bufferFrames*p.config.Channels)
 	for p.positionFrames < target {
 		remaining := target - p.positionFrames
-		frames := int64(bufferFrames)
-		if remaining < frames {
-			frames = remaining
+		if p.framesUntilTick <= 0 {
+			if err := p.engine.AdvanceTicks(1); err != nil {
+				return err
+			}
+			p.framesUntilTick = maxInt(p.engine.CurrentTickFrames(), 1)
+			p.mixer.ApplySnapshot(p.engine.SnapshotView())
 		}
-		_, err := p.renderLocked(buffer[:int(frames)*p.config.Channels], true)
-		if err != nil {
-			return err
+		step := int64(p.framesUntilTick)
+		if remaining < step {
+			step = remaining
 		}
+		p.mixer.Skip(int(step))
+		p.framesUntilTick -= int(step)
+		p.positionFrames += step
 	}
 	if p.stream != nil {
 		p.stream.resetLocked()
@@ -215,44 +222,16 @@ func (p *player) renderLocked(dst []float32, forceAdvance bool) (int, error) {
 		return 0, nil
 	}
 
-	for i := range dst {
-		dst[i] = 0
-	}
-
 	frames := len(dst) / p.config.Channels
 	if frames == 0 {
+		clear(dst)
 		return 0, nil
 	}
 	used := frames * p.config.Channels
-	p.ensurePCMScratch(used)
-
-	written, err := p.renderPCM16Locked(p.pcmScratch[:used], forceAdvance)
-	if err != nil {
-		return written, err
-	}
-	for i := 0; i < written; i++ {
-		dst[i] = float32(p.pcmScratch[i]) / 32768.0
-	}
-
-	return used, nil
-}
-
-func (p *player) renderPCM16Locked(dst []int16, forceAdvance bool) (int, error) {
-	if len(dst) == 0 {
-		return 0, nil
-	}
-
-	for i := range dst {
-		dst[i] = 0
-	}
-
-	frames := len(dst) / p.config.Channels
-	if frames == 0 {
-		return 0, nil
-	}
-	used := frames * p.config.Channels
+	clear(dst[used:])
 
 	if !p.playing && !forceAdvance {
+		clear(dst[:used])
 		return used, nil
 	}
 
@@ -264,7 +243,49 @@ func (p *player) renderPCM16Locked(dst []int16, forceAdvance bool) (int, error) 
 				return offset, err
 			}
 			p.framesUntilTick = maxInt(p.engine.CurrentTickFrames(), 1)
-			p.mixer.ApplySnapshot(p.engine.Snapshot())
+			p.mixer.ApplySnapshot(p.engine.SnapshotView())
+		}
+		step := minInt(remaining, p.framesUntilTick)
+		written, err := p.mixer.RenderFloatPCM16(dst[offset:offset+step*p.config.Channels], p.volume)
+		if err != nil {
+			return offset + written, err
+		}
+		offset += written
+		p.framesUntilTick -= step
+		remaining -= step
+		p.positionFrames += int64(step)
+	}
+
+	return used, nil
+}
+
+func (p *player) renderPCM16Locked(dst []int16, forceAdvance bool) (int, error) {
+	if len(dst) == 0 {
+		return 0, nil
+	}
+
+	frames := len(dst) / p.config.Channels
+	if frames == 0 {
+		clear(dst)
+		return 0, nil
+	}
+	used := frames * p.config.Channels
+	clear(dst[used:])
+
+	if !p.playing && !forceAdvance {
+		clear(dst[:used])
+		return used, nil
+	}
+
+	remaining := frames
+	offset := 0
+	for remaining > 0 {
+		if p.framesUntilTick <= 0 {
+			if err := p.engine.AdvanceTicks(1); err != nil {
+				return offset, err
+			}
+			p.framesUntilTick = maxInt(p.engine.CurrentTickFrames(), 1)
+			p.mixer.ApplySnapshot(p.engine.SnapshotView())
 		}
 		step := minInt(remaining, p.framesUntilTick)
 		written, err := p.mixer.RenderPCM16(dst[offset : offset+step*p.config.Channels])
@@ -308,14 +329,6 @@ func maxInt(a, b int) int {
 	return b
 }
 
-func (p *player) ensurePCMScratch(size int) {
-	if cap(p.pcmScratch) >= size {
-		p.pcmScratch = p.pcmScratch[:size]
-		return
-	}
-	p.pcmScratch = make([]int16, size)
-}
-
 type pcmStream struct {
 	player  *player
 	pending []byte
@@ -333,7 +346,12 @@ func (s *pcmStream) Read(p []byte) (int, error) {
 	n := 0
 	if len(s.pending) > 0 {
 		copied := copy(p, s.pending)
-		s.pending = s.pending[copied:]
+		if copied < len(s.pending) {
+			remaining := copy(s.pending, s.pending[copied:])
+			s.pending = s.pending[:remaining]
+		} else {
+			s.pending = s.pending[:0]
+		}
 		n += copied
 		if n == len(p) {
 			return n, nil
@@ -353,15 +371,28 @@ func (s *pcmStream) Read(p []byte) (int, error) {
 		return n, err
 	}
 
-	bytes := make([]byte, written*4)
-	for i := 0; i < written; i++ {
-		binary.LittleEndian.PutUint32(bytes[i*4:], math.Float32bits(s.scratch[i]))
+	output := p[n:]
+	fullSamples := minInt(len(output)/4, written)
+	for i := 0; i < fullSamples; i++ {
+		binary.LittleEndian.PutUint32(output[i*4:], math.Float32bits(s.scratch[i]))
 	}
+	n += fullSamples * 4
 
-	copied := copy(p[n:], bytes)
-	n += copied
-	if copied < len(bytes) {
-		s.pending = append(s.pending[:0], bytes[copied:]...)
+	nextSample := fullSamples
+	partial := len(p) - n
+	var encoded [4]byte
+	if partial > 0 {
+		binary.LittleEndian.PutUint32(encoded[:], math.Float32bits(s.scratch[nextSample]))
+		copy(p[n:], encoded[:partial])
+		s.pending = append(s.pending[:0], encoded[partial:]...)
+		n += partial
+		nextSample++
+	} else {
+		s.pending = s.pending[:0]
+	}
+	for ; nextSample < written; nextSample++ {
+		binary.LittleEndian.PutUint32(encoded[:], math.Float32bits(s.scratch[nextSample]))
+		s.pending = append(s.pending, encoded[:]...)
 	}
 	return n, nil
 }

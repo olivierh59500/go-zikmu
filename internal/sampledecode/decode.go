@@ -119,7 +119,7 @@ func downmixStereoToMono(samples []int16) ([]int16, error) {
 		return nil, fmt.Errorf("sampledecode: stereo sample count must be even, got %d", len(samples))
 	}
 
-	mono := make([]int16, len(samples)/2)
+	mono := samples[:len(samples)/2]
 	for i := 0; i < len(samples); i += 2 {
 		mono[i/2] = int16((int32(samples[i]) + int32(samples[i+1])) / 2)
 	}
@@ -128,10 +128,10 @@ func downmixStereoToMono(samples []int16) ([]int16, error) {
 
 func scaleDown(samples []int16, factor int) []int16 {
 	if factor <= 1 || len(samples) == 0 {
-		return append([]int16(nil), samples...)
+		return samples
 	}
 
-	out := make([]int16, 0, (len(samples)+factor-1)/factor)
+	out := samples[:0]
 	for i := 0; i < len(samples); i += factor {
 		end := i + factor
 		if end > len(samples) {

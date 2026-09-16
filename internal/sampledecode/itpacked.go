@@ -1,61 +1,60 @@
 package sampledecode
 
 import (
+	"encoding/binary"
 	"fmt"
 
-	"github.com/olivierh59500/go-zikmu/internal/binary"
 	"github.com/olivierh59500/go-zikmu/internal/module"
 )
 
 func decodeITPacked(data []byte, sampleCount int, flags module.SampleFlags) ([]int16, error) {
-	reader := binary.NewBuffer(data)
-	samples := make([]int16, 0, sampleCount)
+	samples := make([]int16, sampleCount)
+	cursor := 0
+	written := 0
 
-	for len(samples) < sampleCount {
-		compressedLen, err := reader.Uint16LE()
-		if err != nil {
-			return nil, fmt.Errorf("sampledecode: missing IT block header: %w", err)
+	for written < sampleCount {
+		if cursor+2 > len(data) {
+			return nil, fmt.Errorf("sampledecode: missing IT block header: unexpected end of data")
 		}
-
-		block, err := reader.Bytes(int64(compressedLen))
-		if err != nil {
-			return nil, fmt.Errorf("sampledecode: truncated IT block: %w", err)
+		compressedLen := int(binary.LittleEndian.Uint16(data[cursor:]))
+		cursor += 2
+		if compressedLen > len(data)-cursor {
+			return nil, fmt.Errorf("sampledecode: truncated IT block: have=%d want=%d", len(data)-cursor, compressedLen)
 		}
+		block := data[cursor : cursor+compressedLen]
+		cursor += compressedLen
 
-		remaining := sampleCount - len(samples)
+		remaining := sampleCount - written
 		if flags&module.Sample16Bits != 0 {
 			if remaining > 0x4000 {
 				remaining = 0x4000
 			}
-			decoded, decodeErr := decodeITPacked16Block(block, remaining)
-			if decodeErr != nil {
-				return nil, decodeErr
+			if err := decodeITPacked16Block(block, samples[written:written+remaining]); err != nil {
+				return nil, err
 			}
-			samples = append(samples, decoded...)
 		} else {
 			if remaining > 0x8000 {
 				remaining = 0x8000
 			}
-			decoded, decodeErr := decodeITPacked8Block(block, remaining)
-			if decodeErr != nil {
-				return nil, decodeErr
+			if err := decodeITPacked8Block(block, samples[written:written+remaining]); err != nil {
+				return nil, err
 			}
-			samples = append(samples, decoded...)
 		}
+		written += remaining
 	}
 
 	return samples, nil
 }
 
-func decodeITPacked8Block(block []byte, count int) ([]int16, error) {
+func decodeITPacked8Block(block []byte, out []int16) error {
 	br := bitReader{data: block}
-	out := make([]int16, 0, count)
 
 	bits := 9
 	newCount := false
 	var last int8
+	written := 0
 
-	for len(out) < count {
+	for written < len(out) {
 		needBits := bits
 		if newCount {
 			needBits = 3
@@ -63,7 +62,7 @@ func decodeITPacked8Block(block []byte, count int) ([]int16, error) {
 
 		x, err := br.readBits(needBits)
 		if err != nil {
-			return nil, fmt.Errorf("sampledecode: invalid IT 8-bit data: %w", err)
+			return fmt.Errorf("sampledecode: invalid IT 8-bit data: %w", err)
 		}
 
 		if newCount {
@@ -101,24 +100,25 @@ func decodeITPacked8Block(block []byte, count int) ([]int16, error) {
 			}
 			last = int8(uint8(last) + uint8(x))
 		default:
-			return nil, fmt.Errorf("sampledecode: invalid IT 8-bit bit width %d", bits)
+			return fmt.Errorf("sampledecode: invalid IT 8-bit bit width %d", bits)
 		}
 
-		out = append(out, int16(last)<<8)
+		out[written] = int16(last) << 8
+		written++
 	}
 
-	return out, nil
+	return nil
 }
 
-func decodeITPacked16Block(block []byte, count int) ([]int16, error) {
+func decodeITPacked16Block(block []byte, out []int16) error {
 	br := bitReader{data: block}
-	out := make([]int16, 0, count)
 
 	bits := 17
 	newCount := false
 	var last int16
+	written := 0
 
-	for len(out) < count {
+	for written < len(out) {
 		needBits := bits
 		if newCount {
 			needBits = 4
@@ -126,7 +126,7 @@ func decodeITPacked16Block(block []byte, count int) ([]int16, error) {
 
 		x, err := br.readBits(needBits)
 		if err != nil {
-			return nil, fmt.Errorf("sampledecode: invalid IT 16-bit data: %w", err)
+			return fmt.Errorf("sampledecode: invalid IT 16-bit data: %w", err)
 		}
 
 		if newCount {
@@ -164,13 +164,14 @@ func decodeITPacked16Block(block []byte, count int) ([]int16, error) {
 			}
 			last = int16(uint16(last) + uint16(x))
 		default:
-			return nil, fmt.Errorf("sampledecode: invalid IT 16-bit bit width %d", bits)
+			return fmt.Errorf("sampledecode: invalid IT 16-bit bit width %d", bits)
 		}
 
-		out = append(out, last)
+		out[written] = last
+		written++
 	}
 
-	return out, nil
+	return nil
 }
 
 type bitReader struct {

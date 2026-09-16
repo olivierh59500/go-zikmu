@@ -123,6 +123,33 @@ func (m *Mixer) RenderPCM16(dst []int16) (int, error) {
 	return m.renderPCM16(dst)
 }
 
+// RenderFloatPCM16 renders PCM16-quantized samples into a float32 buffer.
+// volume is applied after PCM16 clipping so the result matches converting the
+// output of RenderPCM16 to float32.
+func (m *Mixer) RenderFloatPCM16(dst []float32, volume float32) (int, error) {
+	return m.renderFloatPCM16(dst, volume)
+}
+
+// Reserve grows the internal mix buffer outside the real-time render path.
+func (m *Mixer) Reserve(frames int) {
+	if frames <= 0 {
+		return
+	}
+	m.ensureTickBufSize(frames * m.mixSamplingFactor() * m.outputChannels)
+}
+
+// Skip advances active voices without producing output.
+func (m *Mixer) Skip(frames int) {
+	if frames <= 0 {
+		return
+	}
+	for i := range m.voices {
+		if m.voices[i].active {
+			m.skipChannel(&m.voices[i], frames*m.mixSamplingFactor())
+		}
+	}
+}
+
 func (m *Mixer) renderFloat(dst []float32) (int, error) {
 	if len(dst) == 0 {
 		return 0, nil
@@ -135,13 +162,16 @@ func (m *Mixer) renderFloat(dst []float32) (int, error) {
 	used := frames * m.outputChannels
 	mixFrames := frames * m.mixSamplingFactor()
 	mixSamples := mixFrames * m.outputChannels
-
-	m.ensureTickBufSize(mixSamples)
-	for i := 0; i < mixSamples; i++ {
-		m.tickBuf[i] = 0
+	firstActive := m.firstActiveVoice()
+	if firstActive < 0 {
+		clear(dst[:used])
+		return used, nil
 	}
 
-	for i := range m.voices {
+	m.ensureTickBufSize(mixSamples)
+	clear(m.tickBuf[:mixSamples])
+
+	for i := firstActive; i < len(m.voices); i++ {
 		if !m.voices[i].active {
 			continue
 		}
@@ -164,13 +194,16 @@ func (m *Mixer) renderPCM16(dst []int16) (int, error) {
 	used := frames * m.outputChannels
 	mixFrames := frames * m.mixSamplingFactor()
 	mixSamples := mixFrames * m.outputChannels
-
-	m.ensureTickBufSize(mixSamples)
-	for i := 0; i < mixSamples; i++ {
-		m.tickBuf[i] = 0
+	firstActive := m.firstActiveVoice()
+	if firstActive < 0 {
+		clear(dst[:used])
+		return used, nil
 	}
 
-	for i := range m.voices {
+	m.ensureTickBufSize(mixSamples)
+	clear(m.tickBuf[:mixSamples])
+
+	for i := firstActive; i < len(m.voices); i++ {
 		if !m.voices[i].active {
 			continue
 		}
@@ -178,6 +211,38 @@ func (m *Mixer) renderPCM16(dst []int16) (int, error) {
 	}
 
 	m.mix32To16(dst[:used], m.tickBuf[:mixSamples], frames)
+	return used, nil
+}
+
+func (m *Mixer) renderFloatPCM16(dst []float32, volume float32) (int, error) {
+	if len(dst) == 0 {
+		return 0, nil
+	}
+
+	frames := len(dst) / m.outputChannels
+	if frames == 0 {
+		return 0, nil
+	}
+	used := frames * m.outputChannels
+	mixFrames := frames * m.mixSamplingFactor()
+	mixSamples := mixFrames * m.outputChannels
+	firstActive := m.firstActiveVoice()
+	if firstActive < 0 {
+		clear(dst[:used])
+		return used, nil
+	}
+
+	m.ensureTickBufSize(mixSamples)
+	clear(m.tickBuf[:mixSamples])
+
+	for i := firstActive; i < len(m.voices); i++ {
+		if !m.voices[i].active {
+			continue
+		}
+		m.addChannel(&m.voices[i], m.tickBuf[:mixSamples], mixFrames)
+	}
+
+	m.mix32ToFloatPCM16(dst[:used], m.tickBuf[:mixSamples], frames, volume)
 	return used, nil
 }
 
@@ -371,6 +436,15 @@ func (m *Mixer) ensureTickBufSize(samples int) {
 	m.tickBuf = make([]int32, samples)
 }
 
+func (m *Mixer) firstActiveVoice() int {
+	for i := range m.voices {
+		if m.voices[i].active {
+			return i
+		}
+	}
+	return -1
+}
+
 func (m *Mixer) addChannel(v *voice, dest []int32, frames int) {
 	if v.sample < 0 || v.sample >= len(m.module.Samples) {
 		v.active = false
@@ -451,7 +525,7 @@ func (m *Mixer) addChannel(v *voice, dest []int32, frames int) {
 
 		endPos := v.current + int64(done)*v.increment
 		if v.rawVolume != 0 {
-			v.current = m.mixVoice(sample, v, dest, ptr, done)
+			v.current = m.mixVoiceLoop(sample, v, dest, ptr, done, loopStart, loopEnd, bidi, looped)
 		} else {
 			v.lastLeftValue = 0
 			v.lastRightValue = 0
@@ -467,14 +541,191 @@ func (m *Mixer) addChannel(v *voice, dest []int32, frames int) {
 	}
 }
 
+func (m *Mixer) skipChannel(v *voice, frames int) {
+	if v.sample < 0 || v.sample >= len(m.module.Samples) {
+		v.active = false
+		return
+	}
+
+	sample := &m.module.Samples[v.sample]
+	if len(sample.Data) == 0 || v.increment == 0 {
+		v.active = false
+		v.lastLeftValue = 0
+		v.lastRightValue = 0
+		return
+	}
+
+	todo := frames
+	fracBits := m.mixFractionBits()
+	for todo > 0 {
+		loopStart, loopEnd, bidi, looped := activeLoop(sample, v.keyOn)
+		idxsize := (int64(len(sample.Data)) << fracBits) - 1
+		var idxlpos, idxlend int64
+		if looped {
+			idxlpos = int64(loopStart) << fracBits
+			idxlend = (int64(loopEnd) << fracBits) - 1
+		}
+
+		if v.increment < 0 {
+			if looped && v.current < idxlpos {
+				if bidi {
+					v.current = idxlpos + (idxlpos - v.current)
+					v.increment = -v.increment
+				} else {
+					v.current = idxlend - (idxlpos - v.current)
+				}
+			} else if !looped && v.current < 0 {
+				v.current = 0
+				v.active = false
+				break
+			}
+		} else {
+			if looped && v.current >= idxlend {
+				if bidi {
+					v.increment = -v.increment
+					v.current = idxlend - (v.current - idxlend)
+				} else {
+					v.current = idxlpos + (v.current - idxlend)
+				}
+			} else if !looped && v.current >= idxsize {
+				v.current = 0
+				v.active = false
+				break
+			}
+		}
+
+		var end int64
+		switch {
+		case v.increment < 0 && looped:
+			end = idxlpos
+		case v.increment < 0:
+			end = 0
+		case looped:
+			end = idxlend
+		default:
+			end = idxsize
+		}
+
+		done := 0
+		if !((v.increment > 0 && v.current >= end) || (v.increment < 0 && v.current <= end) || v.increment == 0) {
+			span := (end-v.current)/v.increment + 1
+			if span > 0 {
+				done = minInt(int(span), todo)
+			}
+		}
+		if done <= 0 {
+			v.active = false
+			break
+		}
+
+		endPos := v.current + int64(done)*v.increment
+		if v.rawVolume != 0 {
+			lastPos := endPos - v.increment
+			value := m.sampleAt(sample, lastPos, v.keyOn)
+			v.lastLeftValue = int32(v.leftSel) * value
+			if m.outputChannels == 1 || v.rawPanning == int(modmodel.PanSurround) {
+				v.lastRightValue = v.lastLeftValue
+			} else {
+				v.lastRightValue = int32(v.rightSel) * value
+			}
+			advanceSmoothing(v, done)
+		} else {
+			v.lastLeftValue = 0
+			v.lastRightValue = 0
+		}
+		v.current = endPos
+		todo -= done
+	}
+}
+
+func advanceSmoothing(v *voice, samples int) {
+	if v.rampRemaining > 0 {
+		step := minInt(samples, v.rampRemaining)
+		v.rampRemaining -= step
+		samples -= step
+	}
+	if samples > 0 && v.clickRemaining > 0 {
+		v.clickRemaining -= minInt(samples, v.clickRemaining)
+	}
+}
+
 func (m *Mixer) mixVoice(sample *modmodel.Sample, v *voice, dest []int32, ptr, count int) int64 {
+	if sample == nil {
+		return v.current
+	}
+	loopStart, loopEnd, bidi, looped := activeLoop(sample, v.keyOn)
+	return m.mixVoiceLoop(sample, v, dest, ptr, count, loopStart, loopEnd, bidi, looped)
+}
+
+func (m *Mixer) mixVoiceLoop(sample *modmodel.Sample, v *voice, dest []int32, ptr, count, loopStart, loopEnd int, bidi, looped bool) int64 {
+	transition := 0
+	if v.rampRemaining > 0 {
+		transition += v.rampRemaining
+	}
+	if v.clickRemaining > 0 {
+		transition += v.clickRemaining
+	}
+	if transition > 0 {
+		transition = minInt(transition, count)
+		current := m.mixVoiceGeneric(sample, v, dest, ptr, transition, loopStart, loopEnd, bidi, looped)
+		if transition == count {
+			return current
+		}
+		v.current = current
+		ptr += transition * m.outputChannels
+		count -= transition
+	}
+
+	if m.interpolation &&
+		v.rawPanning != int(modmodel.PanSurround) &&
+		v.rampRemaining <= 0 &&
+		v.clickRemaining <= 0 {
+		if m.outputChannels == 1 {
+			return m.mixMonoLinearSteady(sample.Data, v, dest, ptr, count, loopStart, loopEnd, bidi, looped)
+		}
+		return m.mixStereoLinearSteady(sample.Data, v, dest, ptr, count, loopStart, loopEnd, bidi, looped)
+	}
+	if !m.interpolation &&
+		v.rawPanning != int(modmodel.PanSurround) &&
+		v.rampRemaining <= 0 &&
+		v.clickRemaining <= 0 {
+		return m.mixNearestSteady(sample.Data, v, dest, ptr, count)
+	}
+
+	return m.mixVoiceGeneric(sample, v, dest, ptr, count, loopStart, loopEnd, bidi, looped)
+}
+
+func (m *Mixer) mixVoiceGeneric(sample *modmodel.Sample, v *voice, dest []int32, ptr, count, loopStart, loopEnd int, bidi, looped bool) int64 {
 	current := v.current
 	lastMixedLeft := v.lastLeftValue
 	lastMixedRight := v.lastRightValue
 	clickShift := m.mixClickShift()
 	clickBuffer := m.mixClickBuffer()
+	fracBits := m.mixFractionBits()
+	fracMask := m.mixFractionMask()
+	fracScale := m.mixFractionScale()
+	data := sample.Data
 	for i := 0; i < count; i++ {
-		value := m.sampleAt(sample, current, v.keyOn)
+		index := int(current >> fracBits)
+		value := int32(0)
+		if uint(index) < uint(len(data)) {
+			primary := data[index]
+			value = int32(primary)
+			if m.interpolation {
+				nextIndex := index + 1
+				secondary := int16(0)
+				switch {
+				case looped && index >= loopStart && nextIndex >= loopEnd && bidi:
+					secondary = data[loopEnd-1]
+				case looped && index >= loopStart && nextIndex >= loopEnd:
+					secondary = data[loopStart]
+				case uint(nextIndex) < uint(len(data)):
+					secondary = data[nextIndex]
+				}
+				frac := current & fracMask
+				value = int32(((int64(primary) * (fracScale - frac)) + (int64(secondary) * frac)) >> fracBits)
+			}
+		}
 		leftMix, rightMix, ramping := rampMixSelectors(v, clickShift)
 		clicking := v.clickRemaining > 0 && !ramping
 
@@ -538,6 +789,174 @@ func (m *Mixer) mixVoice(sample *modmodel.Sample, v *voice, dest []int32, ptr, c
 	}
 	v.lastLeftValue = lastMixedLeft
 	v.lastRightValue = lastMixedRight
+	return current
+}
+
+func (m *Mixer) mixNearestSteady(data []int16, v *voice, dest []int32, ptr, count int) int64 {
+	current := v.current
+	increment := v.increment
+	fracBits := m.mixFractionBits()
+	leftSel := int32(v.leftSel)
+	rightSel := int32(v.rightSel)
+	lastValue := int32(0)
+
+	if m.outputChannels == 1 {
+		dest = dest[ptr : ptr+count]
+		for i := range dest {
+			value := int32(data[int(current>>fracBits)])
+			dest[i] += leftSel * value
+			lastValue = value
+			current += increment
+		}
+		v.lastLeftValue = leftSel * lastValue
+		v.lastRightValue = v.lastLeftValue
+		return current
+	}
+
+	dest = dest[ptr : ptr+count*2]
+	for base := 0; base+1 < len(dest); base += 2 {
+		value := int32(data[int(current>>fracBits)])
+		dest[base] += leftSel * value
+		dest[base+1] += rightSel * value
+		lastValue = value
+		current += increment
+	}
+	v.lastLeftValue = leftSel * lastValue
+	v.lastRightValue = rightSel * lastValue
+	return current
+}
+
+func (m *Mixer) mixMonoLinearSteady(data []int16, v *voice, dest []int32, ptr, count, loopStart, loopEnd int, bidi, looped bool) int64 {
+	current := v.current
+	increment := v.increment
+	fracBits := m.mixFractionBits()
+	fracMask := m.mixFractionMask()
+	fracScale := m.mixFractionScale()
+	leftSel := int32(v.leftSel)
+	lastValue := int32(0)
+	dest = dest[ptr : ptr+count]
+
+	switch {
+	case looped && bidi:
+		guard := data[loopEnd-1]
+		for i := range dest {
+			index := int(current >> fracBits)
+			primary := data[index]
+			nextIndex := index + 1
+			secondary := guard
+			if nextIndex < loopEnd {
+				secondary = data[nextIndex]
+			}
+			frac := current & fracMask
+			value := int32(((int64(primary) * (fracScale - frac)) + (int64(secondary) * frac)) >> fracBits)
+			dest[i] += leftSel * value
+			lastValue = value
+			current += increment
+		}
+	case looped:
+		guard := data[loopStart]
+		for i := range dest {
+			index := int(current >> fracBits)
+			primary := data[index]
+			nextIndex := index + 1
+			secondary := guard
+			if nextIndex < loopEnd {
+				secondary = data[nextIndex]
+			}
+			frac := current & fracMask
+			value := int32(((int64(primary) * (fracScale - frac)) + (int64(secondary) * frac)) >> fracBits)
+			dest[i] += leftSel * value
+			lastValue = value
+			current += increment
+		}
+	default:
+		for i := range dest {
+			index := int(current >> fracBits)
+			primary := data[index]
+			nextIndex := index + 1
+			secondary := int16(0)
+			if nextIndex < len(data) {
+				secondary = data[nextIndex]
+			}
+			frac := current & fracMask
+			value := int32(((int64(primary) * (fracScale - frac)) + (int64(secondary) * frac)) >> fracBits)
+			dest[i] += leftSel * value
+			lastValue = value
+			current += increment
+		}
+	}
+
+	v.lastLeftValue = leftSel * lastValue
+	v.lastRightValue = v.lastLeftValue
+	return current
+}
+
+func (m *Mixer) mixStereoLinearSteady(data []int16, v *voice, dest []int32, ptr, count, loopStart, loopEnd int, bidi, looped bool) int64 {
+	current := v.current
+	increment := v.increment
+	fracBits := m.mixFractionBits()
+	fracMask := m.mixFractionMask()
+	fracScale := m.mixFractionScale()
+	leftSel := int32(v.leftSel)
+	rightSel := int32(v.rightSel)
+	lastValue := int32(0)
+	dest = dest[ptr : ptr+count*2]
+
+	switch {
+	case looped && bidi:
+		guard := data[loopEnd-1]
+		for base := 0; base+1 < len(dest); base += 2 {
+			index := int(current >> fracBits)
+			primary := data[index]
+			nextIndex := index + 1
+			secondary := guard
+			if nextIndex < loopEnd {
+				secondary = data[nextIndex]
+			}
+			frac := current & fracMask
+			value := int32(((int64(primary) * (fracScale - frac)) + (int64(secondary) * frac)) >> fracBits)
+			dest[base] += leftSel * value
+			dest[base+1] += rightSel * value
+			lastValue = value
+			current += increment
+		}
+	case looped:
+		guard := data[loopStart]
+		for base := 0; base+1 < len(dest); base += 2 {
+			index := int(current >> fracBits)
+			primary := data[index]
+			nextIndex := index + 1
+			secondary := guard
+			if nextIndex < loopEnd {
+				secondary = data[nextIndex]
+			}
+			frac := current & fracMask
+			value := int32(((int64(primary) * (fracScale - frac)) + (int64(secondary) * frac)) >> fracBits)
+			dest[base] += leftSel * value
+			dest[base+1] += rightSel * value
+			lastValue = value
+			current += increment
+		}
+	default:
+		for base := 0; base+1 < len(dest); base += 2 {
+			index := int(current >> fracBits)
+			primary := data[index]
+			nextIndex := index + 1
+			secondary := int16(0)
+			if nextIndex < len(data) {
+				secondary = data[nextIndex]
+			}
+			frac := current & fracMask
+			value := int32(((int64(primary) * (fracScale - frac)) + (int64(secondary) * frac)) >> fracBits)
+			dest[base] += leftSel * value
+			dest[base+1] += rightSel * value
+			lastValue = value
+			current += increment
+		}
+	}
+
+	v.lastLeftValue = leftSel * lastValue
+	v.lastRightValue = rightSel * lastValue
 	return current
 }
 
@@ -706,10 +1125,15 @@ func rampMixSelectors(v *voice, clickShift int) (int, int, bool) {
 
 func (m *Mixer) mix32ToFloat(dst []float32, src []int32, frames int) {
 	if m.mixSamplingFactor() == 1 {
-		for i, value := range src[:len(dst)] {
-			mixed := float32(value>>(bitShift-fpShift)) * floatMixScale
-			mixed *= m.masterVolume
-			dst[i] = clampSample(mixed)
+		src = src[:len(dst)]
+		if m.masterVolume == 1 {
+			for i, value := range src {
+				dst[i] = clampSample(float32(value>>(bitShift-fpShift)) * floatMixScale)
+			}
+			return
+		}
+		for i, value := range src {
+			dst[i] = clampSample(float32(value>>(bitShift-fpShift)) * floatMixScale * m.masterVolume)
 		}
 		return
 	}
@@ -742,7 +1166,14 @@ func (m *Mixer) mix32ToFloat(dst []float32, src []int32, frames int) {
 
 func (m *Mixer) mix32To16(dst []int16, src []int32, frames int) {
 	if m.mixSamplingFactor() == 1 {
-		for i, value := range src[:len(dst)] {
+		src = src[:len(dst)]
+		if m.masterVolume == 1 {
+			for i, value := range src {
+				dst[i] = int16(clampPCM16(value >> bitShift))
+			}
+			return
+		}
+		for i, value := range src {
 			dst[i] = m.mix16Sample(value >> bitShift)
 		}
 		return
@@ -771,6 +1202,49 @@ func (m *Mixer) mix32To16(dst []int16, src []int32, frames int) {
 		}
 		dst[frame*2] = m.mix16Sample(sumLeft / factor)
 		dst[frame*2+1] = m.mix16Sample(sumRight / factor)
+	}
+}
+
+func (m *Mixer) mix32ToFloatPCM16(dst []float32, src []int32, frames int, volume float32) {
+	if m.mixSamplingFactor() == 1 {
+		src = src[:len(dst)]
+		if m.masterVolume == 1 && volume == 1 {
+			for i, value := range src {
+				dst[i] = float32(int16(clampPCM16(value>>bitShift))) / 32768.0
+			}
+			return
+		}
+		for i, value := range src {
+			sample := m.mix16Sample(value >> bitShift)
+			dst[i] = float32(scalePCM16(sample, volume)) / 32768.0
+		}
+		return
+	}
+
+	factor := int32(m.mixSamplingFactor())
+	if m.outputChannels == 1 {
+		for frame := 0; frame < frames; frame++ {
+			sum := int32(0)
+			base := frame * int(factor)
+			for i := 0; i < int(factor); i++ {
+				sum += clampPCM16(src[base+i] >> bitShift)
+			}
+			sample := m.mix16Sample(sum / factor)
+			dst[frame] = float32(scalePCM16(sample, volume)) / 32768.0
+		}
+		return
+	}
+
+	for frame := 0; frame < frames; frame++ {
+		sumLeft := int32(0)
+		sumRight := int32(0)
+		base := frame * int(factor) * 2
+		for i := 0; i < int(factor); i++ {
+			sumLeft += clampPCM16(src[base+i*2] >> bitShift)
+			sumRight += clampPCM16(src[base+i*2+1] >> bitShift)
+		}
+		dst[frame*2] = float32(scalePCM16(m.mix16Sample(sumLeft/factor), volume)) / 32768.0
+		dst[frame*2+1] = float32(scalePCM16(m.mix16Sample(sumRight/factor), volume)) / 32768.0
 	}
 }
 
@@ -810,6 +1284,21 @@ func (m *Mixer) mix16Sample(sample int32) int16 {
 		}
 	}
 	return int16(sample)
+}
+
+func scalePCM16(sample int16, volume float32) int16 {
+	if volume == 1 {
+		return sample
+	}
+	scaled := float32(sample) * volume
+	switch {
+	case scaled >= 32767:
+		return 32767
+	case scaled <= -32768:
+		return -32768
+	default:
+		return int16(scaled)
+	}
 }
 
 func quantizedIncrement(freq float64, sampleRate int) int64 {

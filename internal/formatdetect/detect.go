@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-
-	"github.com/olivierh59500/go-zikmu/internal/binary"
 )
 
 type Kind string
@@ -20,15 +18,15 @@ const (
 
 const modSignatureOffset = 1080
 
-var modSignatures = map[string]struct{}{
-	"M.K.": {},
-	"M!K!": {},
-	"M&K!": {},
-	"OKTA": {},
-	"CD81": {},
-	"CD61": {},
-	"LARD": {},
-	"NSMS": {},
+var modSignatures = map[[4]byte]struct{}{
+	{'M', '.', 'K', '.'}: {},
+	{'M', '!', 'K', '!'}: {},
+	{'M', '&', 'K', '!'}: {},
+	{'O', 'K', 'T', 'A'}: {},
+	{'C', 'D', '8', '1'}: {},
+	{'C', 'D', '6', '1'}: {},
+	{'L', 'A', 'R', 'D'}: {},
+	{'N', 'S', 'M', 'S'}: {},
 }
 
 func Detect(r io.ReaderAt, size int64) (Kind, error) {
@@ -39,9 +37,7 @@ func Detect(r io.ReaderAt, size int64) (Kind, error) {
 		return Unknown, fmt.Errorf("formatdetect: invalid size %d", size)
 	}
 
-	reader := binary.NewReader(r, size)
-
-	match, err := matchIT(reader)
+	match, err := matchIT(r, size)
 	if err != nil {
 		return Unknown, err
 	}
@@ -49,7 +45,7 @@ func Detect(r io.ReaderAt, size int64) (Kind, error) {
 		return IT, nil
 	}
 
-	match, err = matchXM(reader)
+	match, err = matchXM(r, size)
 	if err != nil {
 		return Unknown, err
 	}
@@ -57,7 +53,7 @@ func Detect(r io.ReaderAt, size int64) (Kind, error) {
 		return XM, nil
 	}
 
-	match, err = matchS3M(reader)
+	match, err = matchS3M(r, size)
 	if err != nil {
 		return Unknown, err
 	}
@@ -65,7 +61,7 @@ func Detect(r io.ReaderAt, size int64) (Kind, error) {
 		return S3M, nil
 	}
 
-	match, err = matchMOD(reader)
+	match, err = matchMOD(r, size)
 	if err != nil {
 		return Unknown, err
 	}
@@ -76,26 +72,26 @@ func Detect(r io.ReaderAt, size int64) (Kind, error) {
 	return Unknown, nil
 }
 
-func matchIT(r *binary.Reader) (bool, error) {
-	if r.Size() < 4 {
+func matchIT(r io.ReaderAt, size int64) (bool, error) {
+	if size < 4 {
 		return false, nil
 	}
 
 	var header [4]byte
-	if err := r.ReadAt(0, header[:]); err != nil {
+	if err := readAt(r, 0, header[:]); err != nil {
 		return false, err
 	}
 
-	return bytes.Equal(header[:], []byte("IMPM")), nil
+	return header == [4]byte{'I', 'M', 'P', 'M'}, nil
 }
 
-func matchXM(r *binary.Reader) (bool, error) {
-	if r.Size() < 38 {
+func matchXM(r io.ReaderAt, size int64) (bool, error) {
+	if size < 38 {
 		return false, nil
 	}
 
 	var header [38]byte
-	if err := r.ReadAt(0, header[:]); err != nil {
+	if err := readAt(r, 0, header[:]); err != nil {
 		return false, err
 	}
 
@@ -106,30 +102,30 @@ func matchXM(r *binary.Reader) (bool, error) {
 	return header[37] == 0x1a, nil
 }
 
-func matchS3M(r *binary.Reader) (bool, error) {
-	if r.Size() < 0x30 {
+func matchS3M(r io.ReaderAt, size int64) (bool, error) {
+	if size < 0x30 {
 		return false, nil
 	}
 
 	var header [4]byte
-	if err := r.ReadAt(0x2c, header[:]); err != nil {
+	if err := readAt(r, 0x2c, header[:]); err != nil {
 		return false, err
 	}
 
-	return bytes.Equal(header[:], []byte("SCRM")), nil
+	return header == [4]byte{'S', 'C', 'R', 'M'}, nil
 }
 
-func matchMOD(r *binary.Reader) (bool, error) {
-	if r.Size() < modSignatureOffset+4 {
+func matchMOD(r io.ReaderAt, size int64) (bool, error) {
+	if size < modSignatureOffset+4 {
 		return false, nil
 	}
 
 	var id [4]byte
-	if err := r.ReadAt(modSignatureOffset, id[:]); err != nil {
+	if err := readAt(r, modSignatureOffset, id[:]); err != nil {
 		return false, err
 	}
 
-	if _, ok := modSignatures[string(id[:])]; ok {
+	if _, ok := modSignatures[id]; ok {
 		return true, nil
 	}
 
@@ -156,4 +152,15 @@ func matchMOD(r *binary.Reader) (bool, error) {
 	}
 
 	return false, nil
+}
+
+func readAt(r io.ReaderAt, offset int64, dst []byte) error {
+	n, err := r.ReadAt(dst, offset)
+	if err != nil && err != io.EOF {
+		return err
+	}
+	if n != len(dst) {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
 }

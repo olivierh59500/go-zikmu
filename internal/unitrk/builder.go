@@ -14,7 +14,8 @@ type Track struct {
 }
 
 type Builder struct {
-	rows               []Row
+	commands           []Command
+	rowEnds            []int
 	current            []Command
 	allowEmptyArpeggio bool
 }
@@ -28,9 +29,19 @@ func DecodePair(v uint16) (uint8, uint8) {
 }
 
 func (b *Builder) Reset() {
-	b.rows = b.rows[:0]
+	b.commands = b.commands[:0]
+	b.rowEnds = b.rowEnds[:0]
 	b.current = b.current[:0]
 	b.allowEmptyArpeggio = false
+}
+
+func (b *Builder) Grow(rows int) {
+	if rows > cap(b.rowEnds) {
+		b.rowEnds = make([]int, 0, rows)
+	}
+	if cap(b.current) == 0 {
+		b.current = make([]Command, 0, 8)
+	}
 }
 
 func (b *Builder) SetArpeggioMemory(enabled bool) {
@@ -82,15 +93,28 @@ func (b *Builder) VolumeEffect(effect VolumeEffect, data uint8) {
 }
 
 func (b *Builder) NewLine() {
-	row := Row{Commands: append([]Command(nil), b.current...)}
-	b.rows = append(b.rows, row)
+	b.commands = append(b.commands, b.current...)
+	b.rowEnds = append(b.rowEnds, len(b.commands))
 	b.current = b.current[:0]
 }
 
 func (b *Builder) Track() Track {
-	rows := make([]Row, len(b.rows))
-	for i, row := range b.rows {
-		rows[i] = Row{Commands: append([]Command(nil), row.Commands...)}
+	commands := append([]Command(nil), b.commands...)
+	return Track{Rows: buildRows(commands, b.rowEnds)}
+}
+
+func (b *Builder) TakeTrack() Track {
+	track := Track{Rows: buildRows(b.commands, b.rowEnds)}
+	*b = Builder{}
+	return track
+}
+
+func buildRows(commands []Command, ends []int) []Row {
+	rows := make([]Row, len(ends))
+	start := 0
+	for i, end := range ends {
+		rows[i].Commands = commands[start:end:end]
+		start = end
 	}
-	return Track{Rows: rows}
+	return rows
 }

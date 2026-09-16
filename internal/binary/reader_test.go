@@ -1,10 +1,26 @@
 package binary
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"testing"
 )
+
+func TestReadAllAt(t *testing.T) {
+	want := []byte{1, 2, 3, 4}
+	got, err := ReadAllAt(bytes.NewReader(want), int64(len(want)))
+	if err != nil {
+		t.Fatalf("ReadAllAt failed: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("unexpected data: got=%v want=%v", got, want)
+	}
+
+	if _, err := ReadAllAt(bytes.NewReader(want), int64(len(want)+1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("expected io.EOF for a short reader, got %v", err)
+	}
+}
 
 func TestReaderEndianAndOffsets(t *testing.T) {
 	r := NewBuffer([]byte{

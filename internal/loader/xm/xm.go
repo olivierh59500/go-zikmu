@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 
+	binreader "github.com/olivierh59500/go-zikmu/internal/binary"
 	"github.com/olivierh59500/go-zikmu/internal/module"
 	"github.com/olivierh59500/go-zikmu/internal/sampledecode"
 	"github.com/olivierh59500/go-zikmu/internal/unitrk"
@@ -94,9 +95,8 @@ func Load(r io.ReaderAt, size int64) (*module.Module, error) {
 		return nil, fmt.Errorf("xm: file too short: %d", size)
 	}
 
-	data := make([]byte, size)
-	section := io.NewSectionReader(r, 0, size)
-	if _, err := io.ReadFull(section, data); err != nil {
+	data, err := binreader.ReadAllAt(r, size)
+	if err != nil {
 		return nil, fmt.Errorf("xm: read module: %w", err)
 	}
 
@@ -395,6 +395,7 @@ func readNote(data []byte) (note, int, error) {
 func convertTrack(events []note, rows uint16) unitrk.Track {
 	var builder unitrk.Builder
 	builder.Reset()
+	builder.Grow(int(rows))
 	for i := 0; i < int(rows); i++ {
 		event := note{}
 		if i < len(events) {
@@ -403,7 +404,7 @@ func convertTrack(events []note, rows uint16) unitrk.Track {
 		unitrk.XMEvent(&builder, event.Note, event.Ins, event.Vol, event.Eff, event.Dat)
 		builder.NewLine()
 	}
-	return builder.Track()
+	return builder.TakeTrack()
 }
 
 func emptyPattern(rows uint16, channels int) module.Pattern {

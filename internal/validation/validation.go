@@ -164,7 +164,7 @@ func renderPCM16Experimental(data []byte, cfg zikmu.Config, frames int, opts Ren
 	if err != nil {
 		return 0, nil, err
 	}
-	softwareMixer.Reset(engine.Snapshot())
+	softwareMixer.Reset(engine.SnapshotView())
 
 	samples := make([]int16, frames*cfg.Channels)
 	remaining := frames
@@ -176,7 +176,7 @@ func renderPCM16Experimental(data []byte, cfg zikmu.Config, frames int, opts Ren
 				return 0, nil, err
 			}
 			framesUntilTick = maxInt(engine.CurrentTickFrames(), 1)
-			softwareMixer.ApplySnapshot(engine.Snapshot())
+			softwareMixer.ApplySnapshot(engine.SnapshotView())
 		}
 		step := minInt(remaining, framesUntilTick)
 		written, err := softwareMixer.RenderPCM16(samples[offset : offset+step*cfg.Channels])

@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 
+	binreader "github.com/olivierh59500/go-zikmu/internal/binary"
 	"github.com/olivierh59500/go-zikmu/internal/module"
 	"github.com/olivierh59500/go-zikmu/internal/sampledecode"
 	"github.com/olivierh59500/go-zikmu/internal/unitrk"
@@ -61,9 +62,8 @@ func Load(r io.ReaderAt, size int64) (*module.Module, error) {
 		return nil, fmt.Errorf("mod: file too short: %d", size)
 	}
 
-	data := make([]byte, size)
-	section := io.NewSectionReader(r, 0, size)
-	if _, err := io.ReadFull(section, data); err != nil {
+	data, err := binreader.ReadAllAt(r, size)
+	if err != nil {
 		return nil, fmt.Errorf("mod: read module: %w", err)
 	}
 
@@ -363,6 +363,7 @@ func readPatternNotes(data []byte, offset, channels int) ([]note, int, error) {
 func convertTrack(notes []note, channel, channels int, headers []sampleHeader, modType int) (unitrk.Track, bool) {
 	var builder unitrk.Builder
 	builder.Reset()
+	builder.Grow(rowsPerPattern)
 
 	lastEffect := byte(0x10)
 	usedPanning := false
@@ -373,7 +374,7 @@ func convertTrack(notes []note, channel, channels int, headers []sampleHeader, m
 		builder.NewLine()
 	}
 
-	return builder.Track(), usedPanning
+	return builder.TakeTrack(), usedPanning
 }
 
 func convertNote(builder *unitrk.Builder, raw note, lastEffect byte, headers []sampleHeader, modType int) (byte, bool) {

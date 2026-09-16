@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 
+	binreader "github.com/olivierh59500/go-zikmu/internal/binary"
 	"github.com/olivierh59500/go-zikmu/internal/module"
 	"github.com/olivierh59500/go-zikmu/internal/pitch"
 	"github.com/olivierh59500/go-zikmu/internal/sampledecode"
@@ -125,9 +126,8 @@ func Load(r io.ReaderAt, size int64) (*module.Module, error) {
 		return nil, fmt.Errorf("it: file too short: %d", size)
 	}
 
-	data := make([]byte, size)
-	section := io.NewSectionReader(r, 0, size)
-	if _, err := io.ReadFull(section, data); err != nil {
+	data, err := binreader.ReadAllAt(r, size)
+	if err != nil {
 		return nil, fmt.Errorf("it: read module: %w", err)
 	}
 
@@ -1011,6 +1011,7 @@ func decodePattern(stream []byte, rows int, remap [itMaxChannels]int, channelCou
 	for ch := 0; ch < channelCount; ch++ {
 		var builder unitrk.Builder
 		builder.Reset()
+		builder.Grow(rows)
 		builder.SetArpeggioMemory(true)
 		converter := unitrk.S3MITConverter{
 			ResolveOrder:   resolver,
@@ -1027,7 +1028,7 @@ func decodePattern(stream []byte, rows int, remap [itMaxChannels]int, channelCou
 			}
 			builder.NewLine()
 		}
-		tracks[ch] = builder.Track()
+		tracks[ch] = builder.TakeTrack()
 	}
 
 	return tracks, nil
@@ -1045,10 +1046,11 @@ func emptyPattern(rows uint16, channels int) module.Pattern {
 	for ch := 0; ch < channels; ch++ {
 		var builder unitrk.Builder
 		builder.Reset()
+		builder.Grow(int(rows))
 		for row := 0; row < int(rows); row++ {
 			builder.NewLine()
 		}
-		tracks[ch] = builder.Track()
+		tracks[ch] = builder.TakeTrack()
 	}
 	return module.Pattern{
 		Rows:   rows,

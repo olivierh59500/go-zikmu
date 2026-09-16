@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 
+	binreader "github.com/olivierh59500/go-zikmu/internal/binary"
 	"github.com/olivierh59500/go-zikmu/internal/module"
 	"github.com/olivierh59500/go-zikmu/internal/sampledecode"
 	"github.com/olivierh59500/go-zikmu/internal/unitrk"
@@ -67,9 +68,8 @@ func Load(r io.ReaderAt, size int64) (*module.Module, error) {
 		return nil, fmt.Errorf("s3m: file too short: %d", size)
 	}
 
-	data := make([]byte, size)
-	section := io.NewSectionReader(r, 0, size)
-	if _, err := io.ReadFull(section, data); err != nil {
+	data, err := binreader.ReadAllAt(r, size)
+	if err != nil {
 		return nil, fmt.Errorf("s3m: read module: %w", err)
 	}
 
@@ -485,6 +485,7 @@ func patternStream(data []byte, ptr uint16) ([]byte, error) {
 func convertTrack(rows []note, resolver unitrk.OrderResolver, flags unitrk.S3MITFlags) (unitrk.Track, error) {
 	var builder unitrk.Builder
 	builder.Reset()
+	builder.Grow(len(rows))
 	builder.SetArpeggioMemory(true)
 
 	converter := unitrk.S3MITConverter{
@@ -511,7 +512,7 @@ func convertTrack(rows []note, resolver unitrk.OrderResolver, flags unitrk.S3MIT
 		builder.NewLine()
 	}
 
-	return builder.Track(), nil
+	return builder.TakeTrack(), nil
 }
 
 func applyChannelPanning(mod *module.Module, channels [32]byte, panTable [32]byte, remap [32]int, hasPanTable bool) {

@@ -286,6 +286,113 @@ func TestPlayerVolumeControlAndStreamSeek(t *testing.T) {
 	}
 }
 
+func TestPlayerSeekMatchesRenderedPosition(t *testing.T) {
+	modData := testfixtures.MinimalXM()
+	mod, err := Load(bytes.NewReader(modData), int64(len(modData)))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	cfg := DefaultConfig()
+
+	reference, err := NewPlayer(mod, cfg)
+	if err != nil {
+		t.Fatalf("NewPlayer(reference) failed: %v", err)
+	}
+	const seekDuration = 20 * time.Millisecond
+	seekFrames := int(seekDuration) * cfg.SampleRate / int(time.Second)
+	discard := make([]float32, seekFrames*cfg.Channels)
+	if _, err := reference.Render(discard); err != nil {
+		t.Fatalf("reference Render failed: %v", err)
+	}
+	want := make([]float32, 2048)
+	if _, err := reference.Render(want); err != nil {
+		t.Fatalf("reference continuation failed: %v", err)
+	}
+
+	seeker, err := NewPlayer(mod, cfg)
+	if err != nil {
+		t.Fatalf("NewPlayer(seeker) failed: %v", err)
+	}
+	if err := seeker.Seek(seekDuration); err != nil {
+		t.Fatalf("Seek failed: %v", err)
+	}
+	got := make([]float32, len(want))
+	if _, err := seeker.Render(got); err != nil {
+		t.Fatalf("Render after Seek failed: %v", err)
+	}
+
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("post-seek sample %d differs: got=%f want=%f", i, got[i], want[i])
+		}
+	}
+}
+
+func TestPCMStreamReadDoesNotAllocateAfterWarmup(t *testing.T) {
+	modData := testfixtures.MinimalXM()
+	mod, err := Load(bytes.NewReader(modData), int64(len(modData)))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	player, err := NewPlayer(mod, DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewPlayer failed: %v", err)
+	}
+	stream := player.Stream()
+	buffer := make([]byte, 4093)
+	if _, err := stream.Read(buffer); err != nil {
+		t.Fatalf("warmup Read failed: %v", err)
+	}
+
+	var readErr error
+	allocs := testing.AllocsPerRun(100, func() {
+		_, readErr = stream.Read(buffer)
+	})
+	if readErr != nil {
+		t.Fatalf("Read failed: %v", readErr)
+	}
+	if allocs != 0 {
+		t.Fatalf("stream Read allocated after warmup: %f allocs/run", allocs)
+	}
+}
+
+func TestPCMStreamHandlesUnalignedReads(t *testing.T) {
+	modData := testfixtures.MinimalXM()
+	mod, err := Load(bytes.NewReader(modData), int64(len(modData)))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	const outputSize = 257
+
+	referencePlayer, err := NewPlayer(mod, DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewPlayer(reference) failed: %v", err)
+	}
+	want := make([]byte, outputSize)
+	if _, err := io.ReadFull(referencePlayer.Stream(), want); err != nil {
+		t.Fatalf("reference Read failed: %v", err)
+	}
+
+	for _, chunkSize := range []int{1, 2, 3, 5, 7, 11} {
+		player, err := NewPlayer(mod, DefaultConfig())
+		if err != nil {
+			t.Fatalf("NewPlayer(chunk=%d) failed: %v", chunkSize, err)
+		}
+		stream := player.Stream()
+		got := make([]byte, outputSize)
+		for offset := 0; offset < len(got); {
+			end := minInt(offset+chunkSize, len(got))
+			if _, err := io.ReadFull(stream, got[offset:end]); err != nil {
+				t.Fatalf("Read(chunk=%d) failed: %v", chunkSize, err)
+			}
+			offset = end
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("unaligned stream differs for chunk size %d", chunkSize)
+		}
+	}
+}
+
 func hasNonZeroFloat32(values []float32) bool {
 	for _, value := range values {
 		if value != 0 {

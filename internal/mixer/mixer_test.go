@@ -1,6 +1,7 @@
 package mixer
 
 import (
+	"fmt"
 	"math"
 	"testing"
 
@@ -31,6 +32,45 @@ func TestMixerRendersStereoAudio(t *testing.T) {
 	}
 	if !hasNonZero(dst) {
 		t.Fatalf("expected non-zero stereo output: %v", dst)
+	}
+}
+
+func TestMixerSkipMatchesDiscardedRender(t *testing.T) {
+	for _, channels := range []int{1, 2} {
+		for _, interpolation := range []bool{false, true} {
+			for _, flags := range []modmodel.SampleFlags{
+				modmodel.SampleLoop,
+				modmodel.SampleLoop | modmodel.SampleBidiLoop,
+				modmodel.SampleLoop | modmodel.SampleReverse,
+			} {
+				name := fmt.Sprintf("channels=%d/interpolation=%t/flags=%d", channels, interpolation, flags)
+				t.Run(name, func(t *testing.T) {
+					mod := testLoopModule()
+					mod.Samples[0].Flags = flags
+					cfg := Config{SampleRate: 44100, OutputChannels: channels, Interpolation: interpolation}
+					rendered, err := New(mod, cfg)
+					if err != nil {
+						t.Fatalf("New(rendered) failed: %v", err)
+					}
+					skipped, err := New(mod, cfg)
+					if err != nil {
+						t.Fatalf("New(skipped) failed: %v", err)
+					}
+					snapshot := singleVoiceSnapshot(1, 48, 64, 128, true)
+					rendered.Reset(snapshot)
+					skipped.Reset(snapshot)
+
+					const frames = 257
+					if _, err := rendered.Render(make([]float32, frames*channels)); err != nil {
+						t.Fatalf("discarded Render failed: %v", err)
+					}
+					skipped.Skip(frames)
+					if rendered.voices[0] != skipped.voices[0] {
+						t.Fatalf("voice state differs after skip\nrendered=%+v\nskipped=%+v", rendered.voices[0], skipped.voices[0])
+					}
+				})
+			}
+		}
 	}
 }
 
@@ -182,13 +222,13 @@ func TestMixerUsesSnapshotVoicesWhenProvided(t *testing.T) {
 		}},
 		Voices: []replay.ChannelSnapshot{
 			{
-				Active:   true,
-				Trigger:  1,
-				Note:     48,
-				Sample:   0,
-				Volume:   64,
-				Panning:  128,
-				KeyOn:    true,
+				Active:    true,
+				Trigger:   1,
+				Note:      48,
+				Sample:    0,
+				Volume:    64,
+				Panning:   128,
+				KeyOn:     true,
 				Frequency: 8363,
 			},
 			{},

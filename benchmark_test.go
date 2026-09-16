@@ -3,6 +3,7 @@ package zikmu_test
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"github.com/olivierh59500/go-zikmu"
 	"github.com/olivierh59500/go-zikmu/internal/validation"
@@ -23,6 +24,56 @@ func BenchmarkLoadRegressionCorpus(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+func BenchmarkStreamRead(b *testing.B) {
+	cfg := validation.DefaultConfig()
+	entry := validation.RegressionCorpus()[5]
+	module, err := zikmu.Load(bytes.NewReader(entry.Data), int64(len(entry.Data)))
+	if err != nil {
+		b.Fatalf("Load failed: %v", err)
+	}
+	player, err := zikmu.NewPlayer(module, cfg)
+	if err != nil {
+		b.Fatalf("NewPlayer failed: %v", err)
+	}
+	stream := player.Stream()
+	buffer := make([]byte, cfg.BufferSamples*cfg.Channels*4-3)
+	if _, err := stream.Read(buffer); err != nil {
+		b.Fatalf("warmup Read failed: %v", err)
+	}
+	b.ReportAllocs()
+	b.SetBytes(int64(len(buffer)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := stream.Read(buffer); err != nil {
+			b.Fatalf("Read failed: %v", err)
+		}
+	}
+}
+
+func BenchmarkSeek(b *testing.B) {
+	cfg := validation.DefaultConfig()
+	entry := validation.RegressionCorpus()[5]
+	module, err := zikmu.Load(bytes.NewReader(entry.Data), int64(len(entry.Data)))
+	if err != nil {
+		b.Fatalf("Load failed: %v", err)
+	}
+	player, err := zikmu.NewPlayer(module, cfg)
+	if err != nil {
+		b.Fatalf("NewPlayer failed: %v", err)
+	}
+	const target = 30 * time.Second
+	if err := player.Seek(target); err != nil {
+		b.Fatalf("warmup Seek failed: %v", err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := player.Seek(target); err != nil {
+			b.Fatalf("Seek failed: %v", err)
+		}
 	}
 }
 
