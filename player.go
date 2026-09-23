@@ -164,6 +164,15 @@ func (p *player) Render(dst []float32) (int, error) {
 	return p.renderLocked(dst, false)
 }
 
+// RenderUntilEnd behaves like Render but stops at the module's native song end.
+// It returns complete frames and io.EOF without appending a silent tail. The
+// existing Render method continues to preserve its historical endless behavior.
+func (p *player) RenderUntilEnd(dst []float32) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.renderBoundedLocked(dst, false, true)
+}
+
 func (p *player) RenderPCM16(dst []int16) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -218,6 +227,10 @@ func (p *player) seekFramesLocked(target int64) error {
 }
 
 func (p *player) renderLocked(dst []float32, forceAdvance bool) (int, error) {
+	return p.renderBoundedLocked(dst, forceAdvance, false)
+}
+
+func (p *player) renderBoundedLocked(dst []float32, forceAdvance, stopAtEnd bool) (int, error) {
 	if len(dst) == 0 {
 		return 0, nil
 	}
@@ -244,6 +257,10 @@ func (p *player) renderLocked(dst []float32, forceAdvance bool) (int, error) {
 			}
 			p.framesUntilTick = maxInt(p.engine.CurrentTickFrames(), 1)
 			p.mixer.ApplySnapshot(p.engine.SnapshotView())
+		}
+		if stopAtEnd && p.engine.SnapshotView().Ended {
+			clear(dst[offset:used])
+			return offset, io.EOF
 		}
 		step := minInt(remaining, p.framesUntilTick)
 		written, err := p.mixer.RenderFloatPCM16(dst[offset:offset+step*p.config.Channels], p.volume)

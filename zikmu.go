@@ -72,6 +72,14 @@ type Player interface {
 	Render(dst []float32) (int, error)
 }
 
+// FiniteRenderer is implemented by players returned by NewPlayer. It stops at
+// native song-end markers; callers can Reset and Play to loop without guessing
+// a soundtrack duration. Modules with intentional infinite control flow remain
+// infinite. Keeping this optional interface preserves existing Player adapters.
+type FiniteRenderer interface {
+	RenderUntilEnd(dst []float32) (int, error)
+}
+
 func Load(r io.ReaderAt, size int64) (*Module, error) {
 	format, err := Detect(r, size)
 	if err != nil {

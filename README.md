@@ -207,3 +207,9 @@ and supported formats are unchanged.
 The compatibility core is distributed under the GNU General Public License in
 [`internal/st3/LICENSE`](internal/st3/LICENSE); the surrounding library retains
 its existing license. No soundtrack assets are included with the core.
+
+For exports or native-length looping, players returned by `NewPlayer` implement
+`FiniteRenderer`. Its `RenderUntilEnd` method returns the final complete PCM
+frames with `io.EOF` at the song's native end, without a silent tail. `Reset` then
+`Play` restarts deterministically. Existing `Render` callers retain their
+continuous-stream behavior; intentional tracker loops remain continuous.
