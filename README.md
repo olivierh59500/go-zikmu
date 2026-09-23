@@ -192,3 +192,18 @@ The repository also contains:
 ## License
 
 MIT. See [`LICENSE`](LICENSE).
+
+### Timing-sensitive Scream Tracker playback
+
+`NewScreamTracker3(data, ScreamTracker3Options{SampleRate: 48000,
+Interpolation: true})` selects the integer Scream Tracker compatibility mixer.
+`Fill` renders interleaved `int16` stereo without callback allocations;
+`PositionAt` maps an audible sample frame to its order, row, tracker frame and
+order-separator flags. Its marker history is bounded. `StartOrder` starts at a
+specific order; `PackedPatterns` supports the pattern encoding in FC soundtracks.
+Ordinary S3M files leave `PackedPatterns` false. The default `NewPlayer` behavior
+and supported formats are unchanged.
+
+The compatibility core is distributed under the GNU General Public License in
+[`internal/st3/LICENSE`](internal/st3/LICENSE); the surrounding library retains
+its existing license. No soundtrack assets are included with the core.
